@@ -23,7 +23,10 @@ Introductory material to get started with W&B.
 ### 🟡 201 – Intermediate
 Build on the basics and incorporate more advanced features.
 
-- [Add intermediate-level examples here]
+- **Fine-tuning a Transformer with PyTorch Lightning** – Integrate W&B into model fine-tuning workflows.  
+- **Organizing Hyperparameter Sweeps in PyTorch** – Efficiently manage and visualize sweeps.  
+- **Log a Confusion Matrix with W&B** – Visualize and interpret model performance.  
+- **W&B End-to-End with PyTorch Lightning** – A complete training-to-logging workflow example.  
 
 ---
 
