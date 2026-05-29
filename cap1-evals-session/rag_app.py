@@ -292,7 +292,11 @@ def lookup_document(doc_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# LLM shim. Real OpenAI when key present, deterministic mock otherwise.
+# LLM shim. Tries Capital One internal LLMs first (the path cap1 folks will
+# actually run on), then OpenAI for anyone outside the sandbox with a key,
+# then a deterministic mock so the demo runs anywhere. Every backend goes
+# through the same `llm_complete` @weave.op and returns the same
+# LLMResponse shape, so traces look identical across backends.
 # ---------------------------------------------------------------------------
 
 @dataclass
@@ -300,22 +304,57 @@ class LLMResponse:
     text: str
 
 
+C1_DEFAULT_MODEL = "gpt-oss-20b"
+OPENAI_DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def _have_c1() -> bool:
+    try:
+        import c1.aiml.genai.inference  # noqa: F401
+        return True
+    except Exception:
+        return False
+
+
 def _have_openai() -> bool:
     return bool(os.environ.get("OPENAI_API_KEY"))
 
 
+def _pick_backend() -> str:
+    if _have_c1():
+        return "c1"
+    if _have_openai():
+        return "openai"
+    return "mock"
+
+
 @weave.op()
-def llm_complete(prompt: str, *, model: str = "gpt-4o-mini") -> LLMResponse:
-    if not _have_openai():
-        return LLMResponse(text=_mock_response(prompt))
-    import openai
-    client = openai.OpenAI()
-    resp = client.chat.completions.create(
-        model=model,
-        messages=[{"role": "user", "content": prompt}],
-        temperature=0.0,
-    )
-    return LLMResponse(text=resp.choices[0].message.content or "")
+def llm_complete(prompt: str, *, model: str | None = None) -> LLMResponse:
+    backend = _pick_backend()
+    messages = [{"role": "user", "content": prompt}]
+
+    if backend == "c1":
+        from c1.aiml.genai.inference import Client as C1Client
+        client = C1Client()
+        resp = client.chat.completions.create(
+            model=model or C1_DEFAULT_MODEL,
+            messages=messages,
+            api_version=2,
+            temperature=0.0,
+        )
+        return LLMResponse(text=resp.choices[0].message.content or "")
+
+    if backend == "openai":
+        import openai
+        client = openai.OpenAI()
+        resp = client.chat.completions.create(
+            model=model or OPENAI_DEFAULT_MODEL,
+            messages=messages,
+            temperature=0.0,
+        )
+        return LLMResponse(text=resp.choices[0].message.content or "")
+
+    return LLMResponse(text=_mock_response(prompt))
 
 
 # ---------------------------------------------------------------------------
