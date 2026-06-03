@@ -14,7 +14,7 @@ Usage:
 
 import os
 
-import weave
+from c1_aiml_aem import weave
 
 from rag_app import PROMPT_STRICT, QUESTIONS, rag_answer
 

@@ -26,7 +26,7 @@ import asyncio
 import os
 import re
 
-import weave
+from c1_aiml_aem import weave
 
 from rag_app import (
     DOCUMENTS,
