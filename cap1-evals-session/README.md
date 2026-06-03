@@ -23,7 +23,6 @@ cap1-evals-session/
 ├── 01_tracing_basics.py      populate the project with traces
 ├── 02_compare_prompts.py     ⭐ THE central A/B/C demo
 ├── 03_scoring_mechanisms.py  five scorer patterns on one run
-├── 04_aggregation_view.py    latest-eval-per-variant comparison table
 └── requirements.txt
 ```
 
@@ -60,7 +59,6 @@ mock LLM whose outputs are biased to make the comparison meaningful.
 python 01_tracing_basics.py        # populate the project with traces
 python 02_compare_prompts.py       # ⭐ THE central A/B/C demo
 python 03_scoring_mechanisms.py    # five scorer patterns on one prompt
-python 04_aggregation_view.py      # cross-run comparison table
 ```
 
 After `02_compare_prompts.py`, open the Weave UI:
@@ -83,7 +81,6 @@ side by side.
 | 4. The RAG app + 3 prompt templates            | "Shape of the app"              | `rag_app.py` |
 | 5. Five scoring mechanisms                     | "Scoring mechanisms"            | `03_scoring_mechanisms.py` |
 | 6. Compare prompts in the UI                   | "Comparing prompts"             | `02_compare_prompts.py` |
-| 7. Aggregation & saved views                   | "Aggregation & views"           | `04_aggregation_view.py` |
 
 ## Notes for the presenter
 
