@@ -37,6 +37,34 @@ from rag_app import (
     rag_answer,
 )
 
+
+# Raw template strings, kept until `_publish_prompts()` wraps each in a
+# weave.StringPrompt and publishes it under a stable variant name +
+# alias. After publishing, PROMPT_BY_VARIANT holds the prompt OBJECTS
+# (with refs) that get attached to the RAGAgent.
+_RAW_PROMPTS: dict[str, str] = {
+    "strict": PROMPT_STRICT,
+    "permissive": PROMPT_PERMISSIVE,
+    "concise": PROMPT_CONCISE,
+}
+
+PROMPT_BY_VARIANT: dict[str, weave.StringPrompt] = {}
+
+
+def _publish_prompts() -> None:
+    """Publish each variant prompt with name == alias == variant.
+
+    Result in the Prompts tab: three named prompts (`strict`,
+    `permissive`, `concise`), each with `@latest` (auto) and
+    `@<variant>` (explicit) aliases. The RAGAgent then references
+    these published objects, so the Compare view's model card renders
+    the full prompt content and links to the prompt in the Prompts tab.
+    """
+    for variant, text in _RAW_PROMPTS.items():
+        prompt = weave.StringPrompt(text)
+        weave.publish(prompt, name=variant, aliases=[variant])
+        PROMPT_BY_VARIANT[variant] = prompt
+
 # Where eval runs land. WANDB_ENTITY is required (your team name on the
 # W&B host). WANDB_PROJECT defaults to `cap1-evals-demo`.
 _ENTITY = os.environ.get("WANDB_ENTITY")
@@ -54,14 +82,14 @@ PROJECT = f"{_ENTITY}/{os.environ.get('WANDB_PROJECT', 'cap1-evals-demo')}"
 
 class RAGAgent(weave.Model):
     prompt_variant: str
-    prompt_template: str
+    prompt: weave.StringPrompt
 
     @weave.op()
     def predict(self, question: str, **_kwargs) -> dict:
         # **_kwargs swallows the other dataset fields (expected_doc_ids,
         # required_topics, in_scope) that Weave routes to scorers but
         # that the model itself doesn't need.
-        return rag_answer(question, self.prompt_template)
+        return rag_answer(question, self.prompt.content)
 
 
 # ---------------------------------------------------------------------------
@@ -158,11 +186,29 @@ def length_within_range(output: dict) -> dict:
     return {"length_ok": 6 <= words <= 200, "word_count": words}
 
 
+RELEVANCE_PROMPT = (
+    "You are auditing whether the answer addresses the user's question. "
+    "Ignore whether the facts are correct — that's a separate check. "
+    "Answer ONLY 'yes' or 'no'.\n\n"
+    "Question: {question}\n\nAnswer: {answer}\nSources: ignored\n\n"
+    "On topic (yes/no):"
+)
+
+
+@weave.op()
+def answer_relevance(output: dict, question: str) -> dict:
+    """Binary LLM judge: does the answer address the question?"""
+    judge_in = RELEVANCE_PROMPT.format(question=question, answer=output["answer"])
+    verdict = llm_complete(judge_in).text.strip().lower()
+    return {"relevant": verdict.startswith("yes"), "judge_raw": verdict[:40]}
+
+
 SCORERS = [
     retrieval_recall,
     has_required_topics,
     cites_expected_docs,
     faithfulness,
+    answer_relevance,
     refusal_when_out_of_scope,
     length_within_range,
 ]
@@ -184,8 +230,11 @@ DATASET = [
 ]
 
 
-async def run_one(variant_name: str, template: str) -> None:
-    model = RAGAgent(prompt_variant=variant_name, prompt_template=template)
+async def run_one(variant_name: str) -> None:
+    model = RAGAgent(
+        prompt_variant=variant_name,
+        prompt=PROMPT_BY_VARIANT[variant_name],
+    )
     evaluation = weave.Evaluation(
         name=eval_display_name(f"prompt-{variant_name}"),
         dataset=DATASET,
@@ -198,9 +247,10 @@ async def run_one(variant_name: str, template: str) -> None:
 
 async def main() -> None:
     weave.init(PROJECT)
-    await run_one("strict",     PROMPT_STRICT)
-    await run_one("permissive", PROMPT_PERMISSIVE)
-    await run_one("concise",    PROMPT_CONCISE)
+    _publish_prompts()
+    await run_one("strict")
+    await run_one("permissive")
+    await run_one("concise")
     print(
         "\nDone. In the Weave UI: sort the Evaluations tab by name "
         "(descending), multi-select all three runs, click Compare."
