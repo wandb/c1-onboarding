@@ -28,7 +28,7 @@ import os
 import re
 from dataclasses import dataclass
 
-import weave
+from c1_aiml_aem import weave
 
 
 def eval_display_name(scope: str) -> str:
