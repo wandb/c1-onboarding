@@ -48,12 +48,27 @@ if not _ENTITY:
 PROJECT = f"{_ENTITY}/{os.environ.get('WANDB_PROJECT', 'cap1-evals-demo')}"
 
 
+# Publish the strict prompt as a named weave.StringPrompt (matching
+# 02_compare_prompts.py). RAGAgent holds a ref to the published prompt
+# rather than the raw template string — schema change puts the model's
+# digest in fresh hash space, so it can't collide with older deleted
+# RAGAgent versions in this project's history (no strikethrough).
+PROMPT_BY_VARIANT: dict[str, weave.StringPrompt] = {}
+
+
+def _publish_prompts() -> None:
+    prompt = weave.StringPrompt(PROMPT_STRICT)
+    weave.publish(prompt, name="strict", aliases=["strict"])
+    PROMPT_BY_VARIANT["strict"] = prompt
+
+
 class RAGAgent(weave.Model):
-    prompt_template: str
+    prompt_variant: str
+    prompt: weave.StringPrompt
 
     @weave.op()
     def predict(self, question: str, **_kwargs) -> dict:
-        return rag_answer(question, self.prompt_template)
+        return rag_answer(question, self.prompt.content)
 
 
 # ---------------------------------------------------------------------------
@@ -192,7 +207,11 @@ DATASET = [
 
 async def main() -> None:
     weave.init(PROJECT)
-    model = RAGAgent(prompt_template=PROMPT_STRICT)
+    _publish_prompts()
+    model = RAGAgent(
+        prompt_variant="strict",
+        prompt=PROMPT_BY_VARIANT["strict"],
+    )
     evaluation = weave.Evaluation(
         name=eval_display_name("scoring-mechanisms-strict"),
         dataset=DATASET,
