@@ -194,15 +194,18 @@ SCORERS = [
 ]
 
 
-DATASET = [
-    {
-        "question": q["question"],
-        "expected_doc_ids": q["expected_doc_ids"],
-        "required_topics": q["required_topics"],
-        "in_scope": q["in_scope"],
-    }
-    for q in QUESTIONS
-]
+DATASET = weave.Dataset(
+    name="cap1-support-questions",
+    rows=[
+        {
+            "question": q["question"],
+            "expected_doc_ids": q["expected_doc_ids"],
+            "required_topics": q["required_topics"],
+            "in_scope": q["in_scope"],
+        }
+        for q in QUESTIONS
+    ],
+)
 
 
 async def main() -> None:
