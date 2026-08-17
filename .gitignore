@@ -1,0 +1,3 @@
+# Python bytecode — regenerated on every import, never worth versioning.
+__pycache__/
+*.py[cod]
