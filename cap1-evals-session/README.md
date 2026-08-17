@@ -20,12 +20,25 @@ The shape:
 ```
 cap1-evals-session/
 ├── rag_app.py                ONE agent + tools + corpus + 2 eval suites
+├── scorers.py                THE scorer list — every eval uses this one
 ├── mock_llm.py               no-API-key stand-in — NOT a model, read its header
 ├── 01_tracing_basics.py      populate the project with traces
 ├── 02_compare_prompts.py     ⭐ THE central A/B/C demo, both suites
-├── 03_scoring_mechanisms.py  five scorer patterns on one run
+├── 03_scoring_mechanisms.py  annotated walkthrough of the 5 scorer mechanisms
 └── requirements.txt
 ```
+
+## One scorer list
+
+`scorers.py` defines **12 scorers, and every evaluation runs all of them** —
+regression, capability, and the `03` walkthrough. Evals with different
+scorer sets can't be compared, and in the UI they look like peers when they
+aren't. `03` runs the same list over the same regression dataset as `02`,
+so its numbers should match `02`'s `regression__prompt-strict` run.
+
+The 12 cover five mechanisms, cheapest first: deterministic substring, set
+ops on structured output, regex/structural, binary LLM judge, and per-doc
+fan-out. Reach for the cheapest one that expresses the requirement.
 
 ## Two suites
 
@@ -92,7 +105,7 @@ mock LLM whose outputs are biased to make the comparison meaningful.
 ```bash
 python 01_tracing_basics.py        # populate the project with traces
 python 02_compare_prompts.py       # ⭐ THE central A/B/C demo
-python 03_scoring_mechanisms.py    # five scorer patterns on one prompt
+python 03_scoring_mechanisms.py    # annotated tour of the 5 scorer mechanisms
 ```
 
 After `02_compare_prompts.py`, open the Weave UI:

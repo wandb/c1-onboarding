@@ -1,28 +1,33 @@
 """02 — Compare three prompts on the same RAG agent. THE central demo.
 
-Same agent. Same dataset (Capital One customer-support questions, both
-in-scope and out-of-scope). Same scorers. The ONLY thing that changes
-between the three eval runs is the prompt template.
+Same agent, same scorers (`scorers.SCORERS`, shared with 03), same
+datasets. The ONLY thing that changes between runs is the prompt template
+— that's element two of a good eval framework: one axis of change per run.
+
+Runs both suites:
+  REGRESSION  — 8 rows of behavior we know works. Should sit near 100%.
+  CAPABILITY  — 5 rows we're not confident about. Should start low.
+
+That's six evaluations per invocation (2 suites x 3 prompt variants).
 
 After running this:
-  1. Open the project in the Weave UI.
-  2. Sort the Evaluations tab by name (descending).
-  3. Multi-select all three runs (strict / permissive / concise) and hit
-     Compare — same scorers side by side.
+  1. Open the project in the Weave UI, Evaluations tab.
+  2. Sort by name descending. Runs are named
+     <timestamp>__<suite>__prompt-<variant>.
+  3. Multi-select the three runs of ONE suite and hit Compare. Don't mix
+     suites — different datasets, so the comparison is meaningless.
 
-The mock LLM is biased so the comparison shows real differences:
-  - STRICT cites doc ids and refuses out-of-scope -> high citation and
-    refusal scores.
-  - PERMISSIVE answers everything including out-of-scope -> faithfulness
-    and refusal regress; relevance stays high.
-  - CONCISE is short, skips citations, sometimes misses required topics.
+Expect STRICT to win on citations and refusal. Don't build a story on
+faithfulness; on a real model it tends to come out flat across variants.
+And note the scores move a couple of points between identical runs — that
+wobble is your noise floor, and it's the honest answer to "is this prompt
+change real?"
 """
 
 from __future__ import annotations
 
 import asyncio
 import os
-import re
 
 try:
     # This is the import you'll use — Capital One's internal wrapper.
@@ -36,10 +41,12 @@ from rag_app import (
     PROMPT_STRICT,
     SUITES,
     eval_display_name,
-    llm_complete,
-    parse_cited_doc_ids,
     rag_answer,
 )
+
+# ONE scorer list, shared by every eval in this demo. See scorers.py for
+# what each one checks and which mechanism it demonstrates.
+from scorers import SCORERS
 
 
 # Raw template strings, kept until `_publish_prompts()` wraps each in a
@@ -100,128 +107,6 @@ class RAGAgent(weave.Model):
         # required_topics, in_scope) that Weave routes to scorers but
         # that the model itself doesn't need.
         return rag_answer(question, self.prompt.content)
-
-
-# ---------------------------------------------------------------------------
-# Scorers. Each is binary. Each maps to a single requirement.
-# ---------------------------------------------------------------------------
-
-@weave.op()
-def retrieval_recall(output: dict, expected_doc_ids: list[str]) -> dict:
-    """Did retrieve() return every expected document?
-
-    Pure-function scorer on the structured output of rag_answer.
-    """
-    if not expected_doc_ids:
-        return {"recall_ok": True, "missing": []}
-    retrieved = set(output["retrieved_doc_ids"])
-    missing = [d for d in expected_doc_ids if d not in retrieved]
-    return {"recall_ok": not missing, "missing": missing}
-
-
-@weave.op()
-def has_required_topics(output: dict, required_topics: list[str]) -> dict:
-    """Does the final answer mention every required topic?"""
-    if not required_topics:
-        return {"all_topics_present": True, "missing": []}
-    body = output["answer"].lower()
-    missing = [t for t in required_topics if t.lower() not in body]
-    return {"all_topics_present": not missing, "missing": missing}
-
-
-@weave.op()
-def cites_expected_docs(output: dict, expected_doc_ids: list[str]) -> dict:
-    """Does the answer cite a doc id from the expected set?
-
-    For out-of-scope questions (no expected docs), we don't penalize the
-    absence of citations.
-    """
-    if not expected_doc_ids:
-        return {"citation_ok": True, "cited": []}
-    cited = parse_cited_doc_ids(output["answer"])
-    overlap = [d for d in expected_doc_ids if d in cited]
-    return {"citation_ok": bool(overlap), "cited": cited}
-
-
-GROUNDED_PROMPT = (
-    "You are auditing whether the answer is grounded in the retrieved "
-    "documents. Answer ONLY 'yes' or 'no'.\n\n"
-    "Question: {question}\n\n[DOCS]\n{docs}\n[/DOCS]\n\n"
-    "Answer: {answer}\nSources: ignored\n\nGrounded (yes/no):"
-)
-
-
-@weave.op()
-def faithfulness(output: dict, question: str) -> dict:
-    """Binary LLM judge: is the answer actually grounded in the retrieved docs?"""
-    from rag_app import retrieve
-    docs = retrieve(question, k=3)
-    docs_text = "\n\n".join(f"[doc id={d['id']}]\n{d['content']}" for d in docs)
-    judge_in = GROUNDED_PROMPT.format(
-        question=question, docs=docs_text, answer=output["answer"],
-    )
-    verdict = llm_complete(judge_in).text.strip().lower()
-    return {"grounded": verdict.startswith("yes"), "judge_raw": verdict[:40]}
-
-
-REFUSAL_PROMPT = (
-    "You are auditing whether the answer appropriately refuses to "
-    "answer a question that is out of scope for a Capital One support "
-    "assistant (investment advice, tax advice, legal advice). Answer "
-    "ONLY 'yes' or 'no'.\n\n"
-    "Question: {question}\n\nAnswer: {answer}\nSources: ignored\n\n"
-    "Refused appropriately (yes/no):"
-)
-
-
-@weave.op()
-def refusal_when_out_of_scope(output: dict, question: str, in_scope: bool) -> dict:
-    """Only fires on out-of-scope questions. Passes when the answer is a
-    polite refusal rather than a speculative answer."""
-    if in_scope:
-        return {"refusal_appropriate": True, "applicable": False}
-    judge_in = REFUSAL_PROMPT.format(question=question, answer=output["answer"])
-    verdict = llm_complete(judge_in).text.strip().lower()
-    return {
-        "refusal_appropriate": verdict.startswith("yes"),
-        "applicable": True,
-        "judge_raw": verdict[:40],
-    }
-
-
-@weave.op()
-def length_within_range(output: dict) -> dict:
-    """Catch one-liner answers that pass other scorers by saying nothing."""
-    words = len(re.findall(r"\w+", output["answer"]))
-    return {"length_ok": 6 <= words <= 200, "word_count": words}
-
-
-RELEVANCE_PROMPT = (
-    "You are auditing whether the answer addresses the user's question. "
-    "Ignore whether the facts are correct — that's a separate check. "
-    "Answer ONLY 'yes' or 'no'.\n\n"
-    "Question: {question}\n\nAnswer: {answer}\nSources: ignored\n\n"
-    "On topic (yes/no):"
-)
-
-
-@weave.op()
-def answer_relevance(output: dict, question: str) -> dict:
-    """Binary LLM judge: does the answer address the question?"""
-    judge_in = RELEVANCE_PROMPT.format(question=question, answer=output["answer"])
-    verdict = llm_complete(judge_in).text.strip().lower()
-    return {"relevant": verdict.startswith("yes"), "judge_raw": verdict[:40]}
-
-
-SCORERS = [
-    retrieval_recall,
-    has_required_topics,
-    cites_expected_docs,
-    faithfulness,
-    answer_relevance,
-    refusal_when_out_of_scope,
-    length_within_range,
-]
 
 
 # ---------------------------------------------------------------------------
