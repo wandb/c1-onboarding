@@ -14,11 +14,14 @@ Shape of the demo:
   - The same scorers run against every prompt variant so you can multi-
     select the eval runs in the Weave UI and read off the diff.
 
-The mock LLM is deterministic and intentionally biased so the compare
-view shows real differences: STRICT prompts cite filenames and refuse
-out-of-scope; HELPFUL prompts answer everything (including out-of-scope,
-which is a faithfulness regression); CONCISE prompts skip citations and
-sometimes drop required disclosures.
+Two eval suites live here: REGRESSION (behavior we know works, should sit
+near 100%) and CAPABILITY (behavior we're unsure about, should start low).
+
+Inference goes through `llm_complete`, which prefers Capital One's internal
+gateway, then OpenAI, then a deterministic stand-in in `mock_llm.py`. That
+last one is a convenience for running with no API key — it is NOT a model,
+and the capability suite is skipped rather than faked when it's in play.
+See the header of `mock_llm.py` before trusting anything it produces.
 """
 
 from __future__ import annotations
@@ -28,7 +31,13 @@ import os
 import re
 from dataclasses import dataclass
 
-from c1_aiml_aem import weave
+try:
+    # Capital One's internal wrapper — the import cap1 folks run.
+    from c1_aiml_aem import weave
+except ImportError:
+    # Outside the cap1 sandbox (e.g. presenter laptop), fall back to
+    # the public SDK. Same API surface for everything this demo uses.
+    import weave
 
 
 def eval_display_name(scope: str) -> str:
@@ -179,10 +188,23 @@ _DOC_BY_ID: dict[str, dict] = {d["id"]: d for d in DOCUMENTS}
 
 
 # ---------------------------------------------------------------------------
-# Evaluation dataset: a small set of customer-support questions, each
-# tagged with the documents that SHOULD be retrieved and the topics the
-# answer MUST mention. Use-case teams keep this dataset constant across
-# prompt iterations.
+# TWO SUITES.
+#
+# REGRESSION (`QUESTIONS`) — behavior we already know works. These should
+# sit near 100% for a good prompt. The only interesting day is the day one
+# goes red. This is the suite you gate on.
+#
+# CAPABILITY (`CAPABILITY_QUESTIONS`) — behavior we are NOT confident about
+# yet. These should START LOW on purpose. They are the hill to climb, and
+# the only way to tell whether a prompt or model change actually bought you
+# anything: a saturated regression suite says "still green," which tells you
+# nothing.
+#
+# When a capability row gets reliably solved it doesn't get deleted — it
+# graduates into the regression suite. "Can we do this at all" becomes
+# "can we still do this every time."
+#
+# Every row carries a `suite` tag so you can slice on it in the Weave UI.
 # ---------------------------------------------------------------------------
 
 QUESTIONS: list[dict] = [
@@ -244,9 +266,90 @@ QUESTIONS: list[dict] = [
     },
 ]
 
+for _q in QUESTIONS:
+    _q["suite"] = "regression"
+
+
+# ---------------------------------------------------------------------------
+# CAPABILITY SUITE.
+#
+# Each row targets a failure mode that survives a well-written prompt. The
+# test for whether a row belongs here: could you only write it AFTER watching
+# the agent succeed? If yes it's a regression row. These were all written
+# without knowing whether the bot could handle them.
+#
+# The four failure modes covered:
+#   1. buried exclusion    — headline rate is right, the carve-out is dropped
+#   2. premise correction  — customer's framing of the rule is wrong
+#   3. false certainty     — variable//conditional facts stated flatly
+#   4. adjacent-doc bluff  — corpus has related content that does NOT answer
+#                            the question; model borrows it anyway
+#   5. multi-doc retrieval — needs two docs a keyword retriever won't co-rank
+# ---------------------------------------------------------------------------
+
+CAPABILITY_QUESTIONS: list[dict] = [
+    {
+        # Savor is 3% at grocery EXCLUDING superstores. Surfacing the rate
+        # without the carve-out is the single most common RAG failure.
+        "id": "q-cap-grocery-exclusion",
+        "question": "I have the Venture and I'm adding Savor — which card should I put my grocery spend on?",
+        "expected_doc_ids": ["savor-rewards-terms", "venture-rewards-terms"],
+        "required_topics": ["3%", "excluding"],
+        "in_scope": True,
+    },
+    {
+        # The 60 days runs from the STATEMENT date, not from when the
+        # customer noticed. The question is phrased to invite the wrong anchor.
+        "id": "q-cap-dispute-timing",
+        "question": "My statement closed on the 3rd and I only spotted the charge on the 5th — how long do I have to dispute it?",
+        "expected_doc_ids": ["card-dispute-policy"],
+        "required_topics": ["60 days", "statement"],
+        "in_scope": True,
+    },
+    {
+        # APY is variable. "Is it guaranteed?" invites a flat yes.
+        "id": "q-cap-apy-guaranteed",
+        "question": "Is the 4.10% APY on 360 Performance Savings guaranteed?",
+        "expected_doc_ids": ["360-performance-savings"],
+        "required_topics": ["variable"],
+        "in_scope": True,
+    },
+    {
+        # The corpus says CreditWise has no score impact and Auto Navigator
+        # pre-qualification has no score impact. It says NOTHING about credit
+        # card applications. Borrowing those lines is a hallucination by
+        # adjacency — the hardest kind to catch.
+        "id": "q-cap-credit-inquiry",
+        "question": "Will applying for the Venture card hurt my credit score?",
+        "expected_doc_ids": [],
+        "required_topics": [],
+        "in_scope": False,
+    },
+    {
+        # Needs quicksilver-rewards-terms AND international-travel. A keyword
+        # retriever tends to rank only one. Stresses retrieval, not the prompt.
+        "id": "q-cap-japan-fees",
+        "question": "I'm taking my Quicksilver to Japan next month — any fees I should know about?",
+        "expected_doc_ids": ["quicksilver-rewards-terms", "international-travel"],
+        "required_topics": ["no foreign transaction"],
+        "in_scope": True,
+    },
+]
+
+for _q in CAPABILITY_QUESTIONS:
+    _q["suite"] = "capability"
+
+
+ALL_QUESTIONS: list[dict] = QUESTIONS + CAPABILITY_QUESTIONS
+
+SUITES: dict[str, list[dict]] = {
+    "regression": QUESTIONS,
+    "capability": CAPABILITY_QUESTIONS,
+}
+
 
 def find_question(qid: str) -> dict:
-    return next(q for q in QUESTIONS if q["id"] == qid)
+    return next(q for q in ALL_QUESTIONS if q["id"] == qid)
 
 
 # ---------------------------------------------------------------------------
@@ -354,218 +457,12 @@ def llm_complete(prompt: str, *, model: str | None = None) -> LLMResponse:
         )
         return LLMResponse(text=resp.choices[0].message.content or "")
 
-    return LLMResponse(text=_mock_response(prompt))
+    # Imported lazily: mock_llm imports DOCUMENTS/_tokenize back out of this
+    # module, so a top-level import here would be circular. By the time this
+    # line runs, rag_app is fully loaded.
+    from mock_llm import mock_response
 
-
-# ---------------------------------------------------------------------------
-# Mock LLM. Plays two roles:
-#   1. Agent's LLM (when the prompt is one of our RAG prompts) — returns
-#      an answer biased by the [VARIANT=...] tag so scorers diverge.
-#   2. LLM-as-judge (faithfulness, refusal, citation) — answers yes/no
-#      based on structural cues so the demo runs without OPENAI_API_KEY.
-# ---------------------------------------------------------------------------
-
-_QUESTION_BLOCK_RE = re.compile(r"\[QUESTION\](.*?)\[/QUESTION\]", re.DOTALL)
-_DOCS_BLOCK_RE = re.compile(r"\[DOCS\](.*?)\[/DOCS\]", re.DOTALL)
-_ANSWER_BLOCK_RE = re.compile(r"Answer:\s*(.*?)\s*Sources:", re.DOTALL)
-
-
-def _mock_response(prompt: str) -> str:
-    judge = _maybe_judge(prompt)
-    if judge is not None:
-        return judge
-
-    variant = "strict"
-    if "[VARIANT=permissive]" in prompt:
-        variant = "permissive"
-    elif "[VARIANT=concise]" in prompt:
-        variant = "concise"
-
-    qmatch = _QUESTION_BLOCK_RE.search(prompt)
-    question = (qmatch.group(1) if qmatch else "").strip().lower()
-
-    return _mock_rag_answer(variant, question)
-
-
-def _mock_rag_answer(variant: str, question: str) -> str:
-    """Return an answer whose pass/fail signal is deliberately divergent.
-
-    STRICT: cites doc ids, refuses out-of-scope.
-    PERMISSIVE: answers everything, no citations, may add general advice.
-    CONCISE: short, no citations, may skip required topics.
-    """
-
-    # Out-of-scope detection. STRICT refuses; PERMISSIVE answers anyway
-    # (a faithfulness failure we want the scorer to catch).
-    is_out_of_scope = (
-        "stock" in question
-        or "tax" in question
-        or "deduct" in question
-    )
-    if is_out_of_scope:
-        if variant == "strict":
-            return (
-                "I'm not able to provide investment or tax guidance. For "
-                "investment questions, please consult a licensed financial "
-                "advisor; for tax questions, consult a tax professional. "
-                "Sources: (none — out of scope)"
-            )
-        if variant == "permissive":
-            if "stock" in question:
-                return (
-                    "Capital One (COF) has historically been a solid "
-                    "financial stock. I'd say it's a buy if you believe in "
-                    "the consumer credit cycle."
-                )
-            return (
-                "Yes — credit card annual fees are typically deductible "
-                "if the card is used for business purposes. Otherwise "
-                "they generally are not."
-            )
-        # concise
-        return "Not sure — try a financial advisor."
-
-    # In-scope questions — branch on cues.
-    if "venture" in question and "fee" in question:
-        if variant == "strict":
-            return (
-                "The Venture Rewards card has a $95 annual fee. New "
-                "cardholders earn a 75,000-mile welcome bonus after "
-                "spending $4,000 in the first 3 months.\n"
-                "Sources: venture-rewards-terms"
-            )
-        if variant == "permissive":
-            return (
-                "The annual fee on Venture is $95, and the welcome bonus "
-                "is 75,000 miles after $4,000 in spend in the first 3 "
-                "months. It's a great card if you travel."
-            )
-        return "Venture: $95 annual fee, 75,000-mile bonus."
-
-    if "savor" in question and ("4%" in question or "categor" in question):
-        if variant == "strict":
-            return (
-                "Savor earns 4% cash back on dining, entertainment, and "
-                "popular streaming services.\nSources: savor-rewards-terms"
-            )
-        if variant == "permissive":
-            return (
-                "Savor's 4% categories are dining, entertainment, and "
-                "streaming. Grocery is 3% (excluding Walmart/Target)."
-            )
-        return "Savor: 4% on dining, entertainment, streaming."
-
-    if "quicksilver" in question or "venture" in question and "travel" in question:
-        if variant == "strict":
-            return (
-                "For occasional travel, Venture is generally a better fit: "
-                "it earns 2x miles on every purchase and has no foreign "
-                "transaction fee, vs. Quicksilver's 1.5% cash back (also "
-                "with no foreign transaction fee). The $95 annual fee on "
-                "Venture is worth it if you spend enough to clear the "
-                "extra rewards.\n"
-                "Sources: venture-rewards-terms, quicksilver-rewards-terms"
-            )
-        if variant == "permissive":
-            return (
-                "Venture is better for travel — 2x on everything beats "
-                "Quicksilver's 1.5%. Both have no foreign transaction fee."
-            )
-        return "Venture for travel; 2x vs 1.5%."
-
-    if "dispute" in question:
-        if variant == "strict":
-            return (
-                "To dispute a charge, sign in to your account online or in "
-                "the mobile app, locate the transaction, and select 'Report "
-                "a problem.' Disputes must be submitted within 60 days of "
-                "the statement date on which the charge first appeared. If "
-                "you suspect fraud rather than a billing dispute, you can "
-                "also lock your card immediately in the app.\n"
-                "Sources: card-dispute-policy, fraud-and-security"
-            )
-        if variant == "permissive":
-            return (
-                "Use the 'Report a problem' option on the transaction in "
-                "your app. You have 60 days from the statement date. If "
-                "it's fraud, lock the card right away."
-            )
-        return "Report a problem in the app within 60 days."
-
-    if "apy" in question or "savings" in question:
-        if variant == "strict":
-            return (
-                "The 360 Performance Savings account currently offers a "
-                "4.10% variable APY. There are no monthly fees and no "
-                "minimum balance, and funds are FDIC-insured up to "
-                "applicable limits.\n"
-                "Sources: 360-performance-savings"
-            )
-        if variant == "permissive":
-            return "It's around 4.10% APY right now."
-        return "4.10% APY."
-
-    if "travel" in question and ("notice" in question or "notify" in question or "abroad" in question):
-        if variant == "strict":
-            return (
-                "You do not need to set a travel notice before going "
-                "abroad — fraud detection handles travel automatically. "
-                "All Capital One credit cards have no foreign transaction "
-                "fees.\n"
-                "Sources: international-travel"
-            )
-        if variant == "permissive":
-            return (
-                "Nope, no travel notice needed. Just go. Cards have no "
-                "foreign transaction fees."
-            )
-        return "No travel notice required."
-
-    return "I don't have enough information to answer that.\nSources: (none)"
-
-
-# ---------------------------------------------------------------------------
-# LLM-as-judge mock. Returns 'yes' / 'no' based on structural cues so
-# the demo produces a clear comparison even without an API key.
-# ---------------------------------------------------------------------------
-
-def _maybe_judge(prompt: str) -> str | None:
-    p = prompt.lower()
-
-    if "auditing whether the answer is grounded" in p:
-        # Faithfulness judge — say yes if the answer text appears to draw
-        # from the docs block (overlap of content words).
-        ans = _ANSWER_BLOCK_RE.search(prompt)
-        dmatch = _DOCS_BLOCK_RE.search(prompt)
-        if not ans or not dmatch:
-            return "no"
-        answer_tokens = set(_tokenize(ans.group(1)))
-        doc_tokens = set(_tokenize(dmatch.group(1)))
-        if not answer_tokens:
-            return "no"
-        # If most of the meaningful tokens in the answer also appear in
-        # the docs, call it grounded.
-        overlap = answer_tokens & doc_tokens
-        return "yes" if len(overlap) / max(1, len(answer_tokens)) >= 0.35 else "no"
-
-    if "auditing whether the answer appropriately refuses" in p:
-        ans = _ANSWER_BLOCK_RE.search(prompt)
-        body = (ans.group(1) if ans else "").lower()
-        refused = (
-            "not able to provide" in body
-            or "consult" in body
-            or "out of scope" in body
-            or "i don't have enough information" in body
-        )
-        return "yes" if refused else "no"
-
-    if "auditing whether the answer addresses the user's question" in p:
-        ans = _ANSWER_BLOCK_RE.search(prompt)
-        body = (ans.group(1) if ans else "").strip()
-        # Anything substantive that isn't pure refusal counts as relevant.
-        return "yes" if len(body.split()) >= 4 else "no"
-
-    return None
+    return LLMResponse(text=mock_response(prompt))
 
 
 # ---------------------------------------------------------------------------
@@ -656,6 +553,13 @@ def rag_answer(question: str, prompt_template: str, k: int = 3) -> dict:
 
 _SOURCES_LINE_RE = re.compile(r"sources?\s*:\s*(.*)", re.IGNORECASE)
 
+# Real models copy the "[doc id=...]" formatting out of the DOCS block and
+# emit "Sources: [venture-rewards-terms]". Without stripping the wrapping
+# punctuation every citation is scored wrong — which reads as a model
+# failure but is a grader bug. (The mock LLM never did this, so it only
+# surfaces once you point the demo at a real backend.)
+_CITE_STRIP_RE = re.compile(r"^[\[\(<\"'\s]+|[\]\)>\"'\s.]+$")
+
 
 def parse_cited_doc_ids(answer: str) -> list[str]:
     """Pull a list of doc-ids out of a 'Sources: a, b, c' line."""
@@ -665,4 +569,8 @@ def parse_cited_doc_ids(answer: str) -> list[str]:
     raw = m.group(1).strip()
     if raw.lower().startswith("(none"):
         return []
-    return [s.strip().rstrip(".") for s in raw.split(",") if s.strip()]
+    return [
+        cleaned
+        for cleaned in (_CITE_STRIP_RE.sub("", s) for s in raw.split(","))
+        if cleaned
+    ]

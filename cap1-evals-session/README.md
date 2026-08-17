@@ -19,17 +19,46 @@ The shape:
 
 ```
 cap1-evals-session/
-├── rag_app.py                ONE agent + tools + corpus + 3 prompt templates
+├── rag_app.py                ONE agent + tools + corpus + 2 eval suites
+├── mock_llm.py               no-API-key stand-in — NOT a model, read its header
 ├── 01_tracing_basics.py      populate the project with traces
-├── 02_compare_prompts.py     ⭐ THE central A/B/C demo
+├── 02_compare_prompts.py     ⭐ THE central A/B/C demo, both suites
 ├── 03_scoring_mechanisms.py  five scorer patterns on one run
 └── requirements.txt
 ```
 
+## Two suites
+
+- **Regression** (`QUESTIONS`, 8 rows) — behavior we know works. Should sit
+  near 100%; the only interesting day is the day one goes red.
+- **Capability** (`CAPABILITY_QUESTIONS`, 5 rows) — behavior we're not sure
+  about. Should start low. When a row is reliably solved it graduates into
+  the regression suite.
+
+Inference prefers Capital One's internal gateway, then OpenAI, then the
+stand-in in `mock_llm.py`. **The capability suite is skipped on the
+stand-in** — scripting answers to questions you don't know the answer to
+measures nothing. `02` prints which backend it used.
+
 ## 1. Set up Weave
 
+**Inside Capital One**, Weave comes from the internal wrapper package —
+install `c1_aiml_aem` from your internal index, not `weave` from PyPI.
+Every file imports it as:
+
+```python
+from c1_aiml_aem import weave
+```
+
+Each script wraps that import in a `try/except ImportError` that falls
+back to the public `weave` package. That fallback exists only so the
+demo runs on a presenter laptop outside the sandbox — **`c1_aiml_aem` is
+the import you'll actually use**, and the API surface is identical for
+everything in this session. `requirements.txt` pins the public package
+for the same reason.
+
 ```bash
-pip install -r requirements.txt
+pip install -r requirements.txt   # presenter laptop; cap1 uses c1_aiml_aem
 
 # Required — your W&B API key
 export WANDB_API_KEY=<your key>
@@ -43,6 +72,11 @@ export WANDB_ENTITY=<your-team-or-username>
 # Optional — defaults to "cap1-evals-demo". Set this if you want a
 # separate sandbox project (e.g. while iterating on the scorers).
 export WANDB_PROJECT=cap1-evals-demo
+
+# Required if ~/.config/wandb/settings pins a different host. That file
+# wins over your intent, silently — runs land on the wrong server and
+# the project looks empty. Check it before presenting.
+export WANDB_BASE_URL=https://api.wandb.ai
 ```
 
 Open `https://<host-url>/<WANDB_ENTITY>/projects` to verify you can see
@@ -64,11 +98,14 @@ python 03_scoring_mechanisms.py    # five scorer patterns on one prompt
 After `02_compare_prompts.py`, open the Weave UI:
 
 1. Go to the **Evaluations** tab.
-2. Sort by name descending — the three runs are at the top.
-3. Multi-select all three and click **Compare**.
+2. Sort by name descending. Runs are named
+   `<timestamp>__<suite>__prompt-<variant>`, so on a real backend the six
+   most recent are three `capability__*` and three `regression__*`.
+3. Multi-select the **three runs of one suite** and click **Compare** —
+   don't mix suites, they use different datasets.
 
 The compare view shows every scorer column for every prompt variant
-side by side.
+side by side. `02` also prints an overall pass-rate table per suite.
 
 ## Session flow
 

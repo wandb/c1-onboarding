@@ -26,7 +26,11 @@ import asyncio
 import os
 import re
 
-from c1_aiml_aem import weave
+try:
+    # This is the import you'll use — Capital One's internal wrapper.
+    from c1_aiml_aem import weave
+except ImportError:
+    import weave  # presenter laptop only; same API surface
 
 from rag_app import (
     DOCUMENTS,
@@ -58,7 +62,13 @@ PROMPT_BY_VARIANT: dict[str, weave.StringPrompt] = {}
 
 def _publish_prompts() -> None:
     prompt = weave.StringPrompt(PROMPT_STRICT)
-    weave.publish(prompt, name="strict", aliases=["strict"])
+    try:
+        weave.publish(prompt, name="strict", aliases=["strict"])
+    except Exception:
+        # See 02_compare_prompts.py — fe-crew and some staging hosts
+        # 404 on the aliases endpoint. Object still gets published;
+        # fall back to a plain named publish.
+        weave.publish(prompt, name="strict")
     PROMPT_BY_VARIANT["strict"] = prompt
 
 
@@ -215,8 +225,12 @@ async def main() -> None:
         prompt_variant="strict",
         prompt=PROMPT_BY_VARIANT["strict"],
     )
+    run_name = eval_display_name("scoring-mechanisms-strict")
     evaluation = weave.Evaluation(
-        name=eval_display_name("scoring-mechanisms-strict"),
+        name=run_name,
+        # See 02_compare_prompts.py — `evaluation_name` is what the
+        # Evaluations tab sorts on. `name` alone is the object name.
+        evaluation_name=run_name,
         dataset=DATASET,
         scorers=SCORERS,
     )

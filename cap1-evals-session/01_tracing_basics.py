@@ -14,7 +14,11 @@ Usage:
 
 import os
 
-from c1_aiml_aem import weave
+try:
+    # This is the import you'll use — Capital One's internal wrapper.
+    from c1_aiml_aem import weave
+except ImportError:
+    import weave  # presenter laptop only; same API surface
 
 from rag_app import PROMPT_STRICT, QUESTIONS, rag_answer
 

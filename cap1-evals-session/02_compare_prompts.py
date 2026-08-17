@@ -24,13 +24,17 @@ import asyncio
 import os
 import re
 
-from c1_aiml_aem import weave
+try:
+    # This is the import you'll use — Capital One's internal wrapper.
+    from c1_aiml_aem import weave
+except ImportError:
+    import weave  # presenter laptop only; same API surface
 
 from rag_app import (
     PROMPT_CONCISE,
     PROMPT_PERMISSIVE,
     PROMPT_STRICT,
-    QUESTIONS,
+    SUITES,
     eval_display_name,
     llm_complete,
     parse_cited_doc_ids,
@@ -62,7 +66,13 @@ def _publish_prompts() -> None:
     """
     for variant, text in _RAW_PROMPTS.items():
         prompt = weave.StringPrompt(text)
-        weave.publish(prompt, name=variant, aliases=[variant])
+        try:
+            weave.publish(prompt, name=variant, aliases=[variant])
+        except Exception:
+            # Some Weave servers (e.g. staging hosts) 404 on the aliases
+            # API. The object was still published — fall back to a plain
+            # named publish so we keep the stable lineage + auto @latest.
+            weave.publish(prompt, name=variant)
         PROMPT_BY_VARIANT[variant] = prompt
 
 # Where eval runs land. WANDB_ENTITY is required (your team name on the
@@ -219,44 +229,129 @@ SCORERS = [
 # that Weave can match to scorer parameters by name.
 # ---------------------------------------------------------------------------
 
-DATASET = weave.Dataset(
-    name="cap1-support-questions",
-    rows=[
-        {
-            "question": q["question"],
-            "expected_doc_ids": q["expected_doc_ids"],
-            "required_topics": q["required_topics"],
-            "in_scope": q["in_scope"],
-        }
-        for q in QUESTIONS
-    ],
-)
+def _make_dataset(name: str, rows: list[dict]) -> weave.Dataset:
+    return weave.Dataset(
+        name=name,
+        rows=[
+            {
+                "question": q["question"],
+                "expected_doc_ids": q["expected_doc_ids"],
+                "required_topics": q["required_topics"],
+                "in_scope": q["in_scope"],
+                "suite": q["suite"],
+            }
+            for q in rows
+        ],
+    )
 
 
-async def run_one(variant_name: str) -> None:
+# Two suites, two datasets, kept separate on purpose. A regression suite
+# that sits at 100% and a capability suite that starts low answer different
+# questions — averaging them together destroys both signals.
+DATASETS: dict[str, weave.Dataset] = {
+    "regression": _make_dataset("cap1-support-questions", SUITES["regression"]),
+    "capability": _make_dataset("cap1-capability-questions", SUITES["capability"]),
+}
+
+
+async def run_one(variant_name: str, suite: str) -> dict:
     model = RAGAgent(
         prompt_variant=variant_name,
         prompt=PROMPT_BY_VARIANT[variant_name],
     )
+    run_name = eval_display_name(f"{suite}__prompt-{variant_name}")
     evaluation = weave.Evaluation(
-        name=eval_display_name(f"prompt-{variant_name}"),
-        dataset=DATASET,
+        name=run_name,
+        # `name` sets the Evaluation OBJECT name; `evaluation_name` sets the
+        # eval CALL's display name — the one the Evaluations tab sorts on.
+        # Without it Weave auto-names runs (eval-2026-08-14-wise-moon) and
+        # the "sort by name, multi-select three" flow falls apart.
+        evaluation_name=run_name,
+        dataset=DATASETS[suite],
         scorers=SCORERS,
     )
-    print(f"\n=== Running prompt variant: {variant_name} ===")
+    print(f"\n=== {suite.upper()} · prompt variant: {variant_name} ===")
     result = await evaluation.evaluate(model)
     print(result)
+    return result
+
+
+def _pass_rate(result: dict) -> float:
+    """Fraction of binary scorer verdicts that came back true."""
+    fractions = []
+    for scorer, payload in result.items():
+        if scorer == "model_latency" or not isinstance(payload, dict):
+            continue
+        for metric, stats in payload.items():
+            if isinstance(stats, dict) and "true_fraction" in stats:
+                if metric in ("applicable",):  # bookkeeping, not a verdict
+                    continue
+                fractions.append(stats["true_fraction"])
+    return sum(fractions) / len(fractions) if fractions else 0.0
+
+
+def _backend_banner() -> str:
+    """Say out loud which LLM answered, and return the backend name.
+
+    The capability suite is only meaningful against a real model — see the
+    header of mock_llm.py. On the stand-in backend we skip it rather than
+    report a number nobody should act on.
+    """
+    from rag_app import _pick_backend
+
+    backend = _pick_backend()
+    label = {
+        "c1": "Capital One internal inference (real model)",
+        "openai": "OpenAI (real model)",
+        "mock": "deterministic stand-in — NO model call (see mock_llm.py)",
+    }[backend]
+    print(f"\nLLM backend: {label}")
+    if backend == "mock":
+        print(
+            "  ! Regression suite will run: it demonstrates scorer mechanics,\n"
+            "  ! which don't need a real model.\n"
+            "  ! Capability suite will be SKIPPED. Scripting answers to\n"
+            "  ! questions we don't know the answer to would be grading our\n"
+            "  ! own homework. Set OPENAI_API_KEY, or run inside the cap1\n"
+            "  ! sandbox, to measure it for real."
+        )
+    return backend
 
 
 async def main() -> None:
     weave.init(PROJECT)
+    backend = _backend_banner()
     _publish_prompts()
-    await run_one("strict")
-    await run_one("permissive")
-    await run_one("concise")
+
+    suites = ["regression"]
+    if backend == "mock":
+        print("\n>> SKIPPING capability suite (no real model available).")
+    else:
+        suites.append("capability")
+
+    summary: dict[str, dict[str, float]] = {}
+    for suite in suites:
+        summary[suite] = {}
+        for variant in ("strict", "permissive", "concise"):
+            result = await run_one(variant, suite)
+            summary[suite][variant] = _pass_rate(result)
+
+    print("\n" + "=" * 58)
+    print("OVERALL PASS RATE (mean of binary scorer verdicts)")
+    print("=" * 58)
+    print(f"{'suite':<14}{'strict':>12}{'permissive':>14}{'concise':>12}")
+    for suite, by_variant in summary.items():
+        row = "".join(f"{by_variant[v]:>12.0%}" if v == "strict"
+                      else f"{by_variant[v]:>14.0%}" if v == "permissive"
+                      else f"{by_variant[v]:>12.0%}"
+                      for v in ("strict", "permissive", "concise"))
+        print(f"{suite:<14}{row}")
     print(
-        "\nDone. In the Weave UI: sort the Evaluations tab by name "
-        "(descending), multi-select all three runs, click Compare."
+        "\nRegression should sit near the top — that's the gate.\n"
+        "Capability should start low — that's the hill to climb.\n"
+        "\nIn the Weave UI: sort the Evaluations tab by name (descending). "
+        "Runs are named <ts>__<suite>__prompt-<variant>, so each suite's "
+        "three variants group together for Compare."
     )
 
 
